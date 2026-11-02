@@ -1,0 +1,191 @@
+// media/main.js
+
+// ВАЖНО: acquireVsCodeApi можно вызывать только один раз!
+const vscode = acquireVsCodeApi();
+
+let state = { header: {}, blocks: [] };
+let currentEdit = { bIdx: -1, tIdx: -1, dIdx: -1 };
+
+window.addEventListener('message', event => {
+    const message = event.data;
+    console.log('[DCFA] webview get message: ',message);
+    if (message.type === 'update') {
+        state = message.data;
+        renderUI();
+    }
+});
+
+        function renderUI() {
+            const tabs = document.getElementById('tabsContainer');
+            const contents = document.getElementById('contentsContainer');
+            tabs.innerHTML = '';
+            contents.innerHTML = '';
+
+            // Вкладка 0: Общая информация
+            tabs.innerHTML += `<div class="tab active" onclick="switchTab(0)">Файл (S0)</div>`;
+            contents.innerHTML += `<div class="content active" id="tab-0">
+                <h3>Заголовок файла</h3>
+                <p>Блоков: ${state.header.NB}, Исполняемых: ${state.header.NCB}, Заданий: ${state.header.NTSK}</p>
+            </div>`;
+
+            // Вкладки блоков
+            state.blocks.forEach((block, bIdx) => {
+                tabs.innerHTML += `<div class="tab" onclick="switchTab(${bIdx + 1})">Блок ${block.header.IB}</div>`;
+                let html = `<div class="content" id="tab-${bIdx + 1}">
+                    <h3>Задания в блоке ${block.header.IB}</h3>`;
+                
+                block.tasks.forEach((task, tIdx) => {
+                    html += `<div style="margin-bottom: 20px; border: 1px solid var(--vscode-panel-border); padding: 10px;">
+                        <h4>Задание ${task.header.ITsk} (Тип: ${task.header.TpTsk}) 
+                            <button onclick="addObject(${bIdx}, ${tIdx})">+ Добавить</button>
+                        </h4>
+                        <table><tr><th>№</th><th>NN</th>`;
+                    for(let i=7; i>=0; i--) html += `<th>D16b${i}</th>`;
+                    html += `<th>Действия</th></tr>`;
+                    
+                    task.data.forEach((row, dIdx) => {
+                        html += `<tr><td>${dIdx}</td><td>${row.nn}</td>`;
+                        row.words.forEach(w => html += `<td>${w}</td>`);
+                        html += `<td>
+                            <button onclick="editObject(${bIdx}, ${tIdx}, ${dIdx})">Ред.</button>
+                            <button class="btn-danger" onclick="deleteObject(${bIdx}, ${tIdx}, ${dIdx})">Удал.</button>
+                        </td></tr>`;
+                    });
+                    html += `</table></div>`;
+                });
+                html += `</div>`;
+                contents.innerHTML += html;
+            });
+        }
+
+        function switchTab(idx) {
+            document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === idx));
+            document.querySelectorAll('.content').forEach((c, i) => c.classList.toggle('active', i === idx));
+        }
+
+        // --- Логика Модальных окон ---
+        function editObject(bIdx, tIdx, dIdx) {
+            currentEdit = { bIdx, tIdx, dIdx };
+            const task = state.blocks[bIdx].tasks[tIdx];
+            const tp = task.header.TpTsk;
+            const row = task.data[dIdx];
+            
+            document.getElementById('modalTitle').innerText = `Редактирование (TpTsk=${tp})`;
+            const body = document.getElementById('modalBody');
+            body.innerHTML = '';
+
+            if (tp === 4) renderInstructionForm(body, row.words);
+            else if (tp === 2) renderTemplateForm(body, row.words);
+            else body.innerHTML = `<p>Редактирование сырых hex-слов:</p><input type="text" id="rawHex" value="${row.words.join(' ')}" style="width: 100%;">`;
+
+            document.getElementById('objectModal').style.display = 'block';
+        }
+
+        // Форма для Инструкций (TpTsk = 4, 32 бита = 2 слова по 16 бит)
+        function renderInstructionForm(container, words) {
+            // words[0] = D16b7 (старшие), words[7] = D16b0. Для инструкции 32 бита берем слова 6 и 7 (или как договоримся, пусть будут 0 и 1 для примера)
+            // В реальности 128 бит = 8 слов. Инструкция занимает 32 бита (2 слова).
+            const w1 = parseInt(words[6], 16); // Старшие 16 бит инструкции
+            const w0 = parseInt(words[7], 16); // Младшие 16 бит инструкции
+            const cmd = (w1 << 16) | w0;
+
+            const fields = [
+                { name: 'start_gen (cmd[0])', val: (cmd >> 0) & 1 },
+                { name: 'wrout (cmd[1])', val: (cmd >> 1) & 1 },
+                { name: 'rd (cmd[2])', val: (cmd >> 2) & 1 },
+                { name: 'ce_comp (cmd[3])', val: (cmd >> 3) & 1 },
+                { name: 'arconf (cmd[9..4])', val: (cmd >> 4) & 0x3F },
+                { name: 'active_block (cmd[14..12])', val: (cmd >> 12) & 0x7 },
+                { name: 'active_block[0] (cmd[15])', val: (cmd >> 15) & 0x1 },
+                { name: 'mask_wbuf (cmd[19..16])', val: (cmd >> 16) & 0xF },
+                { name: 'eop (cmd[31])', val: (cmd >> 31) & 0x1 }
+            ];
+
+            fields.forEach(f => {
+                container.innerHTML += `<div class="form-group">
+                    <label>${f.name}</label>
+                    <input type="number" class="cmd-field" data-bit="${f.name}" value="${f.val}">
+                </div>`;
+            });
+        }
+
+        // Форма для Шаблонов (TpTsk = 2, 32 байта = 16 слов)
+        function renderTemplateForm(container, words) {
+            container.innerHTML += `<p>Шаблон состоит из 16 слов (32 байта). Ниже пример полей из спецификации:</p>`;
+            // S[161+2i...160+2i] - размер символов подалфавита
+            // Для примера возьмем первые 4 слова
+            for(let i=0; i<4; i++) {
+                container.innerHTML += `<div class="form-group">
+                    <label>Слово ${i} (D16b${7-i})</label>
+                    <input type="text" class="tmpl-field" data-idx="${i}" value="${words[i]}">
+                </div>`;
+            }
+        }
+
+        function saveObject() {
+            const { bIdx, tIdx, dIdx } = currentEdit;
+            const task = state.blocks[bIdx].tasks[tIdx];
+            const tp = task.header.TpTsk;
+            let row = task.data[dIdx];
+
+            if (tp === 4) {
+                let cmd = 0;
+                document.querySelectorAll('.cmd-field').forEach(inp => {
+                    const val = parseInt(inp.value) || 0;
+                    const name = inp.dataset.bit;
+                    // Собираем битовую маску обратно
+                    if (name.includes('cmd[0]')) cmd |= (val & 1) << 0;
+                    if (name.includes('cmd[1]')) cmd |= (val & 1) << 1;
+                    if (name.includes('cmd[2]')) cmd |= (val & 1) << 2;
+                    if (name.includes('cmd[3]')) cmd |= (val & 1) << 3;
+                    if (name.includes('cmd[9..4]')) cmd |= (val & 0x3F) << 4;
+                    if (name.includes('cmd[14..12]')) cmd |= (val & 0x7) << 12;
+                    if (name.includes('cmd[15]')) cmd |= (val & 0x1) << 15;
+                    if (name.includes('cmd[19..16]')) cmd |= (val & 0xF) << 16;
+                    if (name.includes('cmd[31]')) cmd |= (val & 0x1) << 31;
+                });
+                row.words[6] = ((cmd >> 16) & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
+                row.words[7] = (cmd & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
+            } else if (tp === 2) {
+                document.querySelectorAll('.tmpl-field').forEach(inp => {
+                    const idx = parseInt(inp.dataset.idx);
+                    row.words[idx] = inp.value.padStart(4, '0').toUpperCase();
+                });
+            } else {
+                const raw = document.getElementById('rawHex').value.split(/\s+/);
+                if(raw.length === 8) row.words = raw;
+            }
+
+            closeModal();
+            vscode.postMessage({ type: 'save', data: state });
+            renderUI();
+        }
+
+        function closeModal() { document.getElementById('objectModal').style.display = 'none'; }
+
+        function addObject(bIdx, tIdx) {
+            const task = state.blocks[bIdx].tasks[tIdx];
+            // Добавляем пустое 128-битное слово (8 нулевых 16-битных фрагментов)
+            task.data.push({ nn: '1', words: ['0000','0000','0000','0000','0000','0000','0000','0000'] });
+            vscode.postMessage({ type: 'save', data: state });
+            renderUI();
+        }
+
+        function deleteObject(bIdx, tIdx, dIdx) {
+            state.blocks[bIdx].tasks[tIdx].data.splice(dIdx, 1);
+            vscode.postMessage({ type: 'save', data: state });
+            renderUI();
+        }
+
+
+// Обработчики кнопок (вешаем через addEventListener, а не onclick в HTML)
+document.getElementById('btnCancel').addEventListener('click', () => {
+    document.getElementById('objectModal').style.display = 'none';
+});
+
+document.getElementById('btnSave').addEventListener('click', () => {
+    saveObject();
+});
+
+// Сообщаем extension host, что мы готовы принять данные
+vscode.postMessage({ type: 'ready' });
