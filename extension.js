@@ -3,22 +3,68 @@ const fs = require('fs');
 const path = require('path');
 
 function activate(context) {
+    const provider = new DcfaEditorProvider(context);
     context.subscriptions.push(
-        vscode.window.registerCustomEditorProvider('dcfa.editor', new DcfaEditorProvider(context), {
+        vscode.window.registerCustomEditorProvider('dcfa.editor', provider, {
             webviewOptions: { retainContextWhenHidden: true }
         })
     );
+
+    // Команда сохранения из webview (вызывается по Ctrl/Cmd+S через keybinding)
+    context.subscriptions.push(vscode.commands.registerCommand('dcfa.editor.save', () => {
+        provider.requestActiveSave();
+    }));
+
+    // Команда: создать новый DCFA файл с пустым заголовком
+    context.subscriptions.push(vscode.commands.registerCommand('dcfaEditor.newFile', async () => {
+        const uri = await vscode.window.showSaveDialog({
+            filters: { 'DCFA Files': ['dcfa', 'txt'] },
+            defaultUri: vscode.Uri.file('untitled.dcfa')
+        });
+        if (!uri) return;
+        const content = '0 0 0 0\n';
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
+        await vscode.workspace.openTextDocument(uri);
+        await vscode.commands.executeCommand('vscode.openWith', uri, 'dcfa.editor');
+        vscode.window.showInformationMessage(`DCFA: создан файл ${uri.fsPath}`);
+    }));
+
 }
 
 class DcfaEditorProvider {
     constructor(context) {
         this.context = context;
         this._templateCache = null;
+        this._panels = new Map(); // panelId -> { panel, document, lastState }
+    }
+
+    _trackPanel(panel, document) {
+        const id = `${Date.now()}-${Math.random()}`;
+        const entry = { panel, document, lastState: null };
+        this._panels.set(id, entry);
+        // Отслеживаем последнее состояние из webview для Ctrl+S
+        panel.onDidDispose(() => this._panels.delete(id));
+        return entry;
+    }
+
+    requestActiveSave() {
+        // Выбираем последнюю добавленную панель (активную)
+        const entries = Array.from(this._panels.values());
+        const active = entries[entries.length - 1];
+        if (!active) return;
+        const { panel, document, lastState } = active;
+        const data = lastState || this.parseDcfa(document.getText());
+        this.updateDocument(document, data).then(async () => {
+            const ok = await document.save();
+            if (ok) panel.webview.postMessage({ type: 'saved' });
+        });
     }
 
     async resolveCustomTextEditor(document, webviewPanel, _token) {
         webviewPanel.webview.options = { enableScripts: true };
         webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview);
+
+        const panelEntry = this._trackPanel(webviewPanel, document);
 
         const updateWebview = () => {
             const text = document.getText();
@@ -26,9 +72,10 @@ class DcfaEditorProvider {
             webviewPanel.webview.postMessage({ type: 'update', data: jsonData });
         };
 
-        webviewPanel.webview.onDidReceiveMessage(message => {
+        webviewPanel.webview.onDidReceiveMessage(async message => {
             switch (message.type) {
                 case 'save':
+                    panelEntry.lastState = message.data;
                     this.updateDocument(document, message.data).then(() => {
                         // Подтверждаем сохранение в webview
                         webviewPanel.webview.postMessage({ type: 'saved' });
@@ -37,6 +84,62 @@ class DcfaEditorProvider {
                 case 'ready':
                     updateWebview();
                     return;
+                case 'requestDocumentSave': {
+                    // Сохраняем состояние webview в документ и записываем файл на диск
+                    await this.updateDocument(document, message.data || this.parseDcfa(document.getText()));
+                    const ok = await document.save();
+                    if (ok) {
+                        webviewPanel.webview.postMessage({ type: 'saved' });
+                    } else {
+                        vscode.window.showWarningMessage('DCFA: не удалось сохранить файл');
+                    }
+                    return;
+                }
+                case 'exportJson': {
+                    const text = JSON.stringify(this.parseDcfa(document.getText()), null, 2);
+                    await this._saveWithDialog(webviewPanel, 'json', 'JSON files (*.json)', text);
+                    return;
+                }
+                case 'exportTxt': {
+                    const text = this.updateDocumentToString(message.data || this.parseDcfa(document.getText()));
+                    await this._saveWithDialog(webviewPanel, 'txt', 'Text Files (*.txt)', text + '\n');
+                    return;
+                }
+                case 'importTxt': {
+                    const uris = await vscode.window.showOpenDialog({
+                        canSelectFiles: true,
+                        canSelectFolders: false,
+                        canSelectMany: false,
+                        openLabel: 'Импортировать',
+                        filters: { 'DCFA/Text files': ['dcfa', 'txt'] }
+                    });
+                    if (!uris || uris.length === 0) return;
+                    try {
+                        const content = Buffer.concat(
+                            await vscode.workspace.fs.readFile(uris[0])
+                        ).toString('utf-8');
+                        const jsonData = this.parseDcfa(content);
+                        await this.updateDocument(document, jsonData);
+                        webviewPanel.webview.postMessage({ type: 'update', data: jsonData });
+                        vscode.window.showInformationMessage(
+                            `DCFA: импортирован файл ${path.basename(uris[0].fsPath)}`);
+                    } catch (err) {
+                        vscode.window.showErrorMessage(`DCFA: ошибка импорта — ${err.message}`);
+                    }
+                    return;
+                }
+                case 'copyToClipboard': {
+                    await vscode.env.clipboard.writeText(message.text || '');
+                    vscode.window.setStatusBarMessage('DCFA: скопировано в буфер обмена', 2000);
+                    return;
+                }
+                case 'showMessage': {
+                    const text = message.text || '';
+                    if (message.severity === 'error') vscode.window.showErrorMessage(`DCFA: ${text}`);
+                    else if (message.severity === 'warning') vscode.window.showWarningMessage(`DCFA: ${text}`);
+                    else vscode.window.showInformationMessage(`DCFA: ${text}`);
+                    return;
+                }
             }
         });
 
@@ -134,7 +237,7 @@ class DcfaEditorProvider {
         return data;
     }
 
-    updateDocument(document, jsonData) {
+    updateDocumentToString(jsonData) {
         let lines = [];
         
         if (jsonData.header) {
@@ -156,10 +259,32 @@ class DcfaEditorProvider {
             }
         }
         
-        const text = lines.join('\n');
+        return lines.join('\n');
+    }
+
+    updateDocument(document, jsonData) {
+        const text = this.updateDocumentToString(jsonData);
         const edit = new vscode.WorkspaceEdit();
         edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), text);
         return vscode.workspace.applyEdit(edit);
+    }
+
+    async _saveWithDialog(webviewPanel, ext, label, content) {
+        const defaultName = webviewPanel.title.replace(/\.[a-zA-Z]+$/, '') + '.' + ext;
+        const target = await vscode.window.showSaveDialog({
+            filters: { [label]: [ext] },
+            saveLabel: 'Экспортировать',
+            defaultUri: vscode.Uri.file(defaultName)
+        });
+        if (!target) return false;
+        try {
+            await vscode.workspace.fs.writeFile(target, Buffer.from(content, 'utf-8'));
+            vscode.window.showInformationMessage(`DCFA: файл сохранён — ${target.fsPath}`);
+            return true;
+        } catch (err) {
+            vscode.window.showErrorMessage(`DCFA: ошибка сохранения — ${err.message}`);
+            return false;
+        }
     }
 
     async getHtmlForWebview(webview) {
