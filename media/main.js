@@ -23,6 +23,8 @@ function tpName(tp) {
 let state = { header: {}, blocks: [] };
 let originalState = null; // Исходное состояние для сравнения
 let currentEdit = { bIdx: -1, tIdx: -1, dIdx: -1 };
+// Выбранная пара слов для TpTsk=4 (индексы wordIdx в строке данных)
+let selectedPair = null; // { bIdx, tIdx, dIdx, pair } где pair: 0 → w[6],w[7]; 1 → w[4],w[5]; 2 → w[2],w[3]; 3 → w[0],w[1]
 let activeTab = 0;
 let isDirty = false; // Флаг несохранённых изменений
 
@@ -41,6 +43,18 @@ document.addEventListener('click', (event) => {
         case 'switchTab':
             switchTab(tabId);
             break;
+        case 'selectPair': {
+            // Выбор пары 16-битных слов в задании TpTsk=4 (клик вне поля редактирования)
+            const pair = parseInt(target.dataset.pair);
+            if (selectedPair && selectedPair.bIdx === bIdx && selectedPair.tIdx === tIdx &&
+                selectedPair.dIdx === dIdx && selectedPair.pair === pair) {
+                selectedPair = null; // повторный клик по той же паре — снять выделение
+            } else {
+                selectedPair = { bIdx, tIdx, dIdx, pair };
+            }
+            highlightSelectedPair();
+            break;
+        }
         case 'addObject':
             addObject(bIdx, tIdx);
             break;
@@ -517,8 +531,9 @@ function renderUI() {
                 html += `<div class="empty-state">Нет заданий в этом блоке</div>`;
             } else {
                 block.tasks.forEach((task, tIdx) => {
+                    const isProgramTask = task.header.TpTsk === 4;
                     const searchHay = `задание ${task.header.ITsk} tptsk=${task.header.TpTsk} ${tpName(task.header.TpTsk)} cetesk=${task.header.CETsk}`;
-                    html += `<div class="task-card" data-search="${searchHay}" data-bidx="${bIdx}" data-tidx="${tIdx}">
+                    html += `<div class="task-card" data-search="${searchHay}" data-bidx="${bIdx}" data-tidx="${tIdx}" ${isProgramTask ? 'data-program="1"' : ''}>
                         <div class="task-card-header">
                             <h4>
                                 Задание ${task.header.ITsk} ${tpName(task.header.TpTsk)} (TpTsk=${task.header.TpTsk})
@@ -540,7 +555,13 @@ function renderUI() {
                         }
                         html += `<th>Действия</th></tr>`;
                         
+                        const isProgram = task.header.TpTsk === 4;
                         task.data.forEach((row, dIdx) => {
+                            // Пара слов (wordIdx): 0 → w[6],w[7]; 1 → w[4],w[5]; 2 → w[2],w[3]; 3 → w[0],w[1]
+                            const wordPairIdx = (wordIdx) => 3 - Math.floor(wordIdx / 2);
+                            const pairSelected = (wordIdx) => isProgram && selectedPair &&
+                                selectedPair.bIdx === bIdx && selectedPair.tIdx === tIdx &&
+                                selectedPair.dIdx === dIdx && selectedPair.pair === wordPairIdx(wordIdx);
                             html += `<tr>
                                 <td class="row-num">${dIdx}</td>
                                 <td>
@@ -555,17 +576,19 @@ function renderUI() {
                                 </td>`;
                             
                             row.words.forEach((w, wordIdx) => {
-                                html += `<td>
-                                    <input type="text" 
-                                           class="inline-edit hex-input" 
-                                           value="${w}" 
+                                const sel = pairSelected(wordIdx);
+                                html += `<td class="${sel ? 'pair-selected' : ''}"
+                                         ${isProgram ? `data-action="selectPair" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" data-pair="${wordPairIdx(wordIdx)}"` : ''}>
+                                    <input type="text"
+                                           class="inline-edit hex-input"
+                                           value="${w}"
                                            maxlength="4"
-                                           data-bidx="${bIdx}" 
-                                           data-tidx="${tIdx}" 
-                                           data-didx="${dIdx}" 
+                                           data-bidx="${bIdx}"
+                                           data-tidx="${tIdx}"
+                                           data-didx="${dIdx}"
                                            data-field="word"
                                            data-wordidx="${wordIdx}"
-                                           title="16-битное hex-значение">
+                                           title="16-битное hex-значение${isProgram ? ', клик вне поля — выбрать пару слов инструкции' : ''}">
                                 </td>`;
                             });
                             
@@ -597,6 +620,26 @@ function renderUI() {
         fi.value = filterText || '';
         if (filterText) applyFilter();
     }
+
+    highlightSelectedPair();
+}
+
+// ==================== ВЫБОР ПАРЫ СЛОВ (TpTsk=4) ====================
+// pair 0 → w[6],w[7]; pair 1 → w[4],w[5]; pair 2 → w[2],w[3]; pair 3 → w[0],w[1]
+// wordIdx = 6 - pair*2 и 7 - pair*2
+function highlightSelectedPair() {
+    document.querySelectorAll('.task-card[data-program="1"] td.pair-selected').forEach(td => {
+        td.classList.remove('pair-selected');
+    });
+    if (!selectedPair) return;
+    const card = document.querySelector(
+        `.task-card[data-bidx="${selectedPair.bIdx}"][data-tidx="${selectedPair.tIdx}"][data-program="1"]`);
+    if (!card) return;
+    const wIdx1 = 6 - selectedPair.pair * 2;
+    const wIdx2 = 7 - selectedPair.pair * 2;
+    card.querySelectorAll(`td input[data-didx="${selectedPair.dIdx}"][data-wordidx="${wIdx1}"],
+                           td input[data-didx="${selectedPair.dIdx}"][data-wordidx="${wIdx2}"]`)
+        .forEach(inp => inp.parentElement.classList.add('pair-selected'));
 }
 
 // ==================== ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК ====================
@@ -629,7 +672,13 @@ function editObject(bIdx, tIdx, dIdx) {
     const body = document.getElementById('modalBody');
     body.innerHTML = '';
 
-    if (tp === 4) renderInstructionForm(body, row.words);
+    if (tp === 4) {
+        // Используем выбранную пару слов; если ничего не выбрано — просим выбрать
+        const sel = (selectedPair && selectedPair.bIdx === bIdx &&
+                     selectedPair.tIdx === tIdx && selectedPair.dIdx === dIdx)
+            ? selectedPair.pair : null;
+        renderInstructionForm(body, row.words, sel);
+    }
     else if (tp === 2) renderTemplateForm(body, row.words);
     else if (tp === 6) renderConfigurationForm(body, row.words);
     else renderRawForm(body, row.words);
@@ -701,6 +750,14 @@ function saveObject() {
     let row = task.data[dIdx];
 
     if (tp === 4) {
+        const sel = (selectedPair && selectedPair.bIdx === bIdx &&
+                     selectedPair.tIdx === tIdx && selectedPair.dIdx === dIdx)
+            ? selectedPair.pair : null;
+        if (sel === null) {
+            // Форма инструкции не отображалась (инструкция не выбрана) — нечего сохранять
+            closeModal();
+            return;
+        }
         let cmd = 0;
         document.querySelectorAll('.cmd-field').forEach(inp => {
             const val = parseInt(inp.value) || 0;
@@ -723,8 +780,9 @@ function saveObject() {
             else if (name === 'inc') cmd |= (val & 0x1) << 30;
             else if (name === 'eop') cmd |= (val & 0x1) << 31;
         });
-        row.words[6] = ((cmd >> 16) & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
-        row.words[7] = (cmd & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
+        const [hiIdx, loIdx] = pairWordIdx(sel);
+        row.words[hiIdx] = ((cmd >> 16) & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
+        row.words[loIdx] = (cmd & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
     } else if (tp === 2) {
         document.querySelectorAll('.tmpl-field').forEach(inp => {
             const idx = parseInt(inp.dataset.idx);
@@ -781,10 +839,27 @@ function closeModal() {
 }
 
 // ==================== ФОРМЫ РЕДАКТИРОВАНИЯ ====================
-function renderInstructionForm(container, words) {
-    const w1 = parseInt(words[6], 16);
-    const w0 = parseInt(words[7], 16);
-    const cmd = (w1 << 16) | w0;
+// Индексы слов строки данных для выбранной пары: pair 0 → [6,7]; 1 → [4,5]; 2 → [2,3]; 3 → [0,1]
+function pairWordIdx(pair) {
+    return [6 - pair * 2, 7 - pair * 2];
+}
+
+function renderInstructionForm(container, words, selPair) {
+    if (selPair === null || selPair === undefined) {
+        container.innerHTML += `<div class="form-section">
+            <div class="instruction-not-selected">Инструкция не выбрана, выберите сначала инструкцию</div>
+            <p style="font-size: 12px; color: var(--vscode-descriptionForeground);">
+                Кликните по ячейке таблицы (вне поля редактирования) в задании «Программы» (TpTsk=4) —
+                соответствующая пара 16-битных слов будет подсвечена. После этого нажмите «Ред.» снова.
+            </p>
+        </div>`;
+        return;
+    }
+
+    const [hiIdx, loIdx] = pairWordIdx(selPair);
+    const w1 = parseInt(words[hiIdx], 16);
+    const w0 = parseInt(words[loIdx], 16);
+    const cmd = ((isNaN(w1) ? 0 : w1) << 16) | (isNaN(w0) ? 0 : w0);
 
     const fields = [
         { name: 'start_gen', range: '[0]', val: (cmd >> 0) & 1 },
@@ -806,7 +881,7 @@ function renderInstructionForm(container, words) {
     ];
 
     container.innerHTML += `<div class="form-section">
-        <div class="form-section-title">Поля инструкции (32 бита)</div>`;
+        <div class="form-section-title">Поля инструкции (32 бита) — пара ${selPair + 1}: D16b${7 - hiIdx}+D16b${7 - loIdx} (w[${hiIdx}], w[${loIdx}])</div>`;
     
     fields.forEach(f => {
         container.innerHTML += `<div class="bit-field">
