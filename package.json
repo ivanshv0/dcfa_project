@@ -1,37 +1,52 @@
 {
-	"name": "dcfa-editor",
-	"displayName": "DCFA Custom Editor",
-	"version": "0.0.1",
-	"engines": {
-		"vscode": "^1.75.0"
-	},
-	"categories": [
-		"Other"
-	],
-	"activationEvents": [
-		"onCustomEditor:dcfa.editor"
-	],
-	"main": "./extension.js",
-	"contributes": {
-		"customEditors": [
-			{
-				"viewType": "dcfa.editor",
-				"displayName": "DCFA Test Data Editor",
-				"selector": [
-					{
-						"filenamePattern": "*.dcfa"
-					},
-					{
-						"filenamePattern": "*.txt"
-					}
-				],
-				"priority": "option"
-			}
-		]
-	},
-	"__metadata": {
-		"installedTimestamp": 1784292827052,
-		"targetPlatform": "undefined",
-		"size": 45718
-	}
+    "name": "dcfa-editor",
+    "displayName": "DCFA Custom Editor",
+    "version": "0.0.1",
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onCustomEditor:dcfa.editor"
+    ],
+    "main": "./extension.js",
+    "contributes": {
+        "customEditors": [
+            {
+                "viewType": "dcfa.editor",
+                "displayName": "DCFA Test Data Editor",
+                "selector": [
+                    {
+                        "filenamePattern": "*.dcfa"
+                    },
+                    {
+                        "filenamePattern": "*.txt"
+                    }
+                ],
+                "priority": "option"
+            }
+        ],
+        "commands": [
+            {
+                "command": "dcfaEditor.newFile",
+                "title": "Создать новый DCFA файл",
+                "category": "DCFA Editor"
+            }
+        ],
+        "keybindings": [
+            {
+                "command": "dcfa.editor.save",
+                "key": "ctrl+s",
+                "mac": "cmd+s",
+                "when": "activeWebviewPanelId == dcfa.editor"
+            }
+        ]
+    },
+    "__metadata": {
+        "installedTimestamp": 1784292827052,
+        "targetPlatform": "undefined",
+        "size": 45718
+    }
 }

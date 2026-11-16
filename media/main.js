@@ -1,9 +1,31 @@
 // media/main.js
 const vscode = acquireVsCodeApi();
 
+// ==================== ТИПЫ ЗАДАНИЙ (TpTsk) ====================
+const TPTSK_NAMES = {
+    0: 'Алфавиты',
+    1: 'Основы',
+    2: 'Шаблоны',
+    3: 'Константы[статические]',
+    4: 'Программы',
+    5: 'Эталоны',
+    6: 'Конфигурации',
+    7: 'Данные[vr3]',
+    8: 'Константы[динамические]',
+    9: 'Параметры',
+    10: 'Маска[vr4]'
+};
+
+function tpName(tp) {
+    return TPTSK_NAMES[tp] !== undefined ? TPTSK_NAMES[tp] : `Неизвестный тип`;
+}
+
 let state = { header: {}, blocks: [] };
 let originalState = null; // Исходное состояние для сравнения
 let currentEdit = { bIdx: -1, tIdx: -1, dIdx: -1 };
+// Выбранная пара слов для TpTsk=4 (индексы wordIdx в строке данных)
+let selectedPair = null; // { bIdx, tIdx, dIdx, pair } где pair: 0 → w[6],w[7]; 1 → w[4],w[5]; 2 → w[2],w[3]; 3 → w[0],w[1]
+let collapsedTasks = new Set(); // свернутые карточки заданий: ключ `${bIdx}:${tIdx}` (по умолчанию все развернуты)
 let activeTab = 0;
 let isDirty = false; // Флаг несохранённых изменений
 
@@ -22,6 +44,29 @@ document.addEventListener('click', (event) => {
         case 'switchTab':
             switchTab(tabId);
             break;
+        case 'selectPair': {
+            // Выбор пары 16-битных слов в задании TpTsk=4 (клик вне поля редактирования)
+            const pair = parseInt(target.dataset.pair);
+            if (selectedPair && selectedPair.bIdx === bIdx && selectedPair.tIdx === tIdx &&
+                selectedPair.dIdx === dIdx && selectedPair.pair === pair) {
+                selectedPair = null; // повторный клик по той же паре — снять выделение
+            } else {
+                selectedPair = { bIdx, tIdx, dIdx, pair };
+            }
+            highlightSelectedPair();
+            break;
+        }
+        case 'toggleTaskCollapse': {
+            // Свернуть/развернуть таблицу значений задания
+            const key = `${bIdx}:${tIdx}`;
+            if (collapsedTasks.has(key)) {
+                collapsedTasks.delete(key);
+            } else {
+                collapsedTasks.add(key);
+            }
+            renderUI();
+            break;
+        }
         case 'addObject':
             addObject(bIdx, tIdx);
             break;
@@ -39,6 +84,37 @@ document.addEventListener('click', (event) => {
             break;
         case 'saveFile':
             saveFile();
+            break;
+        case 'revertFile':
+            revertFile();
+            break;
+        case 'exportTxt':
+            exportTxt();
+            break;
+        case 'exportJson':
+            vscode.postMessage({ type: 'exportJson' });
+            break;
+        case 'importTxt':
+            vscode.postMessage({ type: 'importTxt' });
+            break;
+        case 'copyRow':
+            copyRow(parseInt(target.dataset.bidx), parseInt(target.dataset.tidx), parseInt(target.dataset.didx));
+            break;
+        case 'duplicateRow':
+            duplicateRow(parseInt(target.dataset.bidx), parseInt(target.dataset.tidx), parseInt(target.dataset.didx));
+            break;
+        case 'moveRow':
+            moveRow(parseInt(target.dataset.bidx), parseInt(target.dataset.tidx), parseInt(target.dataset.didx), parseInt(target.dataset.dir));
+            break;
+        case 'decodeWords':
+            decodeWordsFor(parseInt(target.dataset.bidx), parseInt(target.dataset.tidx), parseInt(target.dataset.didx));
+            break;
+        case 'toggleFilter':
+            toggleFilter(target);
+            break;
+        case 'clearFilter':
+            filterText = '';
+            applyFilter();
             break;
     }
 });
@@ -94,6 +170,15 @@ document.addEventListener('change', (event) => {
     flashSuccess(target);
 });
 
+// Глобальные горячие клавиши
+document.addEventListener('keydown', (event) => {
+    // Ctrl/Cmd+S — сохранение на всей странице
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        saveFile();
+    }
+});
+
 // Обработка Enter в input
 document.addEventListener('keydown', (event) => {
     const target = event.target;
@@ -119,13 +204,7 @@ document.addEventListener('keydown', (event) => {
             }
         }, 0);
     }
-    
-    // Ctrl+S — сохранение
-    if (event.ctrlKey && event.key === 's') {
-        event.preventDefault();
-        saveFile();
-    }
-});
+    });
 
 // Фокус на input — выделяем всё содержимое
 document.addEventListener('focusin', (event) => {
@@ -179,8 +258,194 @@ function updateDirtyIndicator() {
 // ==================== СОХРАНЕНИЕ ====================
 function saveFile() {
     console.log('[Webview] saveFile вызван');
+    // Сначала обновляем документ, затем просим хост записать его на диск
     vscode.postMessage({ type: 'save', data: state });
-    markClean();
+    vscode.postMessage({ type: 'requestDocumentSave', data: state });
+    // isDirty сбросим после подтверждения 'saved' от extension host
+}
+
+function revertFile() {
+    if (isDirty) {
+        showConfirmDialog('Отменить все несохранённые изменения и вернуться к последнему сохранённому состоянию?', () => {
+            if (originalState) {
+                state = JSON.parse(JSON.stringify(originalState));
+            }
+            markClean();
+            renderUI();
+        }, 'Откатить', 'Отмена');
+    } else {
+        // Нет локальных изменений — просим extension host перечитать документ
+        vscode.postMessage({ type: 'showMessage', severity: 'info', text: 'Нет несохранённых изменений' });
+    }
+}
+
+function exportTxt() {
+    vscode.postMessage({ type: 'exportTxt', data: state });
+}
+
+// ==================== КОПИРОВАНИЕ / ДУБЛИРОВАНИЕ / ПЕРЕМЕЩЕНИЕ СТРОК ====================
+function rowToText(row) {
+    return `${row.nn} ${row.words.join(' ')}`;
+}
+
+function copyRow(bIdx, tIdx, dIdx) {
+    const row = state.blocks[bIdx].tasks[tIdx].data[dIdx];
+    vscode.postMessage({ type: 'copyToClipboard', text: rowToText(row) });
+}
+
+function duplicateRow(bIdx, tIdx, dIdx) {
+    const task = state.blocks[bIdx].tasks[tIdx];
+    const src = task.data[dIdx];
+    task.data.splice(dIdx + 1, 0, { nn: src.nn, words: src.words.slice() });
+    markDirty();
+    renderUI();
+}
+
+function moveRow(bIdx, tIdx, dIdx, dir) {
+    const task = state.blocks[bIdx].tasks[tIdx];
+    const to = dIdx + dir;
+    if (to < 0 || to >= task.data.length) return;
+    const arr = task.data;
+    [arr[dIdx], arr[to]] = [arr[to], arr[dIdx]];
+    markDirty();
+    renderUI();
+}
+
+// ==================== ФИЛЬТР ЗАДАНИЙ ====================
+let filterText = '';
+
+function toggleFilter(btn) {
+    // Кнопка-переключатель панели фильтра
+    const panel = document.getElementById('filterPanel');
+    if (!panel) return;
+    const hidden = panel.style.display === 'none';
+    panel.style.display = hidden ? 'flex' : 'none';
+    if (hidden) {
+        const inp = document.getElementById('filterInput');
+        if (inp) inp.focus();
+    }
+}
+
+function applyFilter() {
+    const q = (filterText || '').trim().toLowerCase();
+    document.querySelectorAll('.task-card').forEach(card => {
+        if (!q) { card.style.display = ''; return; }
+        const hay = (card.dataset.search || '').toLowerCase();
+        card.style.display = hay.includes(q) ? '' : 'none';
+    });
+    // Обновляем счётчик видимых
+    const content = document.querySelector('.content.active');
+    if (!content) return;
+    const counter = content.querySelector('#filterCount');
+    if (counter) {
+        const total = content.querySelectorAll('.task-card').length;
+        const shown = content.querySelectorAll('.task-card:not([style*="display: none"])').length;
+        counter.textContent = q ? `показано ${shown} из ${total}` : '';
+    }
+}
+
+// ==================== РАСШИФРОВКА СТРОКИ (ДЕКОД ИНСТРУКЦИИ) ====================
+function decodeCmd32(w1, w0) {
+    const cmd = ((w1 << 16) | w0) >>> 0;
+    const g = (shift, mask) => (cmd >>> shift) & mask;
+    return {
+        start_gen: g(0, 1), wrout: g(1, 1), rd: g(2, 1), ce_comp: g(3, 1),
+        arconf: g(4, 0x3F), active_block_3_1: g(12, 0x7), active_block_0: g(15, 1),
+        mask_wbuf: g(16, 0xF), en_xor: g(20, 1), en_and: g(21, 1),
+        type: g(24, 1), type1: g(25, 0x3), pause: g(27, 1),
+        reg_num: g(28, 0x3), inc: g(30, 1), eop: g(31, 1)
+    };
+}
+
+function formatDecodedInstruction(cmd) {
+    const blockBit = (cmd.active_block_0 << 3) | cmd.active_block_3_1;
+    const ops = [];
+    if (cmd.start_gen) ops.push('START_GEN');
+    if (cmd.wrout) ops.push('WROUT');
+    if (cmd.rd) ops.push('RD');
+    if (cmd.ce_comp) ops.push('CE_COMP');
+    if (cmd.pause) ops.push('PAUSE');
+    if (cmd.inc) ops.push('INC');
+    if (cmd.eop) ops.push('EOP');
+    const parts = [];
+    if (ops.length) parts.push('операции: ' + ops.join(' | '));
+    parts.push(`блок=${blockBit}`);
+    parts.push(`reg=${cmd.reg_num}`);
+    parts.push(`arconf=${cmd.arconf}`);
+    parts.push(`mask_wbuf=${cmd.mask_wbuf}`);
+    if (cmd.en_xor) parts.push('XOR');
+    if (cmd.en_and) parts.push('AND');
+    parts.push(cmd.type ? 'srv' : 'std');
+    return parts.join(', ');
+}
+
+function decodeWordsFor(bIdx, tIdx, dIdx) {
+    const task = state.blocks[bIdx].tasks[tIdx];
+    const tp = task.header.TpTsk;
+    const row = task.data[dIdx];
+    const lines = [];
+    lines.push(`TpTsk=${tp}, NN=${row.nn}`);
+    lines.push('Сырые слова (D16b7..D16b0): ' + row.words.join(' '));
+
+    if (tp === 4) {
+        const w1 = parseInt(row.words[6], 16) || 0;
+        const w0 = parseInt(row.words[7], 16) || 0;
+        const cmd = decodeCmd32(w1, w0);
+        lines.push('CMD32 = 0x' + (((w1 << 16) | w0) >>> 0).toString(16).toUpperCase().padStart(8, '0'));
+        lines.push(formatDecodedInstruction(cmd));
+        for (const k of Object.keys(cmd)) {
+            lines.push(`  ${k} = ${cmd[k]}`);
+        }
+    } else if (tp === 2) {
+        const bytes = [];
+        for (const w of row.words) {
+            const v = parseInt(w, 16) || 0;
+            bytes.push((v >> 8) & 0xFF, v & 0xFF);
+        }
+        lines.push('Шаблон (байты): ' + bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '));
+    } else if (tp === 6) {
+        let cnf = BigInt(0);
+        for (let i = 0; i < 8; i++) cnf = (cnf << BigInt(16)) | BigInt(parseInt(row.words[i], 16) || 0);
+        const g = (shift, mask) => Number((cnf >> BigInt(shift)) & BigInt(mask));
+        lines.push('CNF128 = 0x' + cnf.toString(16).toUpperCase().padStart(32, '0'));
+        lines.push(`  a1=${g(0,3)} a2=${g(2,3)} a3=${g(4,3)} a4=${g(6,3)} rec3=${g(8,1)} ac=${g(10,3)} arr=${g(12,3)} dir=${g(14,1)}`);
+        lines.push(`  arc1=${g(16,0x7F)} arc2=${g(24,0x7F)}`);
+        lines.push(`  tr_R=[${g(32,0xFF)},${g(40,0xFF)},${g(48,0xFF)},${g(56,0xFF)}] sh_R=[${g(64,0xFF)},${g(72,0xFF)},${g(80,0xFF)},${g(88,0xFF)}]`);
+        lines.push(`  sh_C=[${g(96,0xFF)},${g(104,0xFF)},${g(112,0xFF)}] rev_reg=${g(120,1)} rev_txt=${g(121,1)}`);
+    }
+
+    showInfoDialog('Декодирование строки', lines.join('\n'));
+}
+
+function showInfoDialog(title, text) {
+    const modal = document.createElement('div');
+    modal.className = 'modal open';
+    modal.style.zIndex = '250';
+    modal.innerHTML = `
+        <div class="modal-content" style="width: 560px;">
+            <div class="modal-header"><h3>${title}</h3></div>
+            <div class="modal-body"><pre class="decoded-output">${text.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre></div>
+            <div class="modal-footer">
+                <button class="btn-secondary" data-info-action="close">Закрыть</button>
+                <button data-info-action="copy">Копировать</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+
+    const cleanup = () => {
+        modal.remove();
+        document.removeEventListener('click', handler, true);
+    };
+    const handler = (event) => {
+        const btn = event.target.closest('[data-info-action]');
+        if (!btn) return;
+        if (btn.dataset.infoAction === 'copy') {
+            vscode.postMessage({ type: 'copyToClipboard', text });
+        } else {
+            cleanup();
+        }
+    };
+    document.addEventListener('click', guarded, true);
 }
 
 // ==================== РЕНДЕРИНГ UI ====================
@@ -231,6 +496,15 @@ function renderUI() {
                 <span class="info-value">${state.header.N128bW || '0'}</span>
             </div>
         </div>
+        <div class="form-section">
+            <div class="form-section-title">Операции с файлом</div>
+            <div class="toolbar">
+                <button class="btn-secondary" data-action="exportTxt" title="Сохранить копию текущего состояния в текстовый файл DCFA">Экспорт в .txt</button>
+                <button class="btn-secondary" data-action="exportJson" title="Выгрузить разобранную структуру в JSON">Экспорт в JSON</button>
+                <button class="btn-secondary" data-action="importTxt" title="Загрузить содержимое другого .dcfa/.txt файла в текущий документ">Импорт из файла…</button>
+                <button class="btn-secondary" data-action="revertFile" title="Отменить несохранённые изменения">Откатить изменения</button>
+            </div>
+        </div>
     </div>`;
 
     // Вкладки блоков
@@ -249,6 +523,11 @@ function renderUI() {
                     ${dirtyIndicator}
                     ${saveButton}
                 </div>
+                <div class="filter-panel" id="filterPanel">
+                    <input type="text" id="filterInput" class="filter-input" placeholder="Фильтр по ID задания / TpTsk…" />
+                    <button class="btn-secondary" data-action="clearFilter">Сброс</button>
+                    <span id="filterCount" class="filter-count"></span>
+                </div>
                 <div class="info-panel">
                     <div class="info-row">
                         <span class="info-label">Всего заданий (NTskB):</span>
@@ -264,15 +543,25 @@ function renderUI() {
                 html += `<div class="empty-state">Нет заданий в этом блоке</div>`;
             } else {
                 block.tasks.forEach((task, tIdx) => {
-                    html += `<div class="task-card">
+                    const isProgramTask = task.header.TpTsk === 4;
+                    const collapsed = collapsedTasks.has(`${bIdx}:${tIdx}`);
+                    const searchHay = `задание ${task.header.ITsk} tptsk=${task.header.TpTsk} ${tpName(task.header.TpTsk)} cetesk=${task.header.CETsk}`;
+                    html += `<div class="task-card${collapsed ? ' collapsed' : ''}" data-search="${searchHay}" data-bidx="${bIdx}" data-tidx="${tIdx}" ${isProgramTask ? 'data-program="1"' : ''}>
                         <div class="task-card-header">
                             <h4>
-                                Задание ${task.header.ITsk}
-                                <span class="task-type-badge task-type-${task.header.TpTsk}">TpTsk=${task.header.TpTsk}</span>
+                                Задание ${task.header.ITsk} ${tpName(task.header.TpTsk)} (TpTsk=${task.header.TpTsk})
+                                <span class="task-type-badge task-type-${task.header.TpTsk}">${tpName(task.header.TpTsk)}</span>
                             </h4>
-                            <button class="btn-add" data-action="addObject" data-bidx="${bIdx}" data-tidx="${tIdx}">+ Добавить</button>
+                            <div class="task-card-header-actions">
+                                <button class="btn-collapse ${collapsed ? 'needs-attention' : ''}"
+                                        data-action="toggleTaskCollapse" data-bidx="${bIdx}" data-tidx="${tIdx}"
+                                        title="${collapsed ? 'Развернуть таблицу значений' : 'Свернуть таблицу значений'}">
+                                    ${collapsed ? '▸ Развернуть' : '▾ Свернуть'}
+                                </button>
+                                <button class="btn-add" data-action="addObject" data-bidx="${bIdx}" data-tidx="${tIdx}">+ Добавить</button>
+                            </div>
                         </div>
-                        <div class="task-card-body">`;
+                        <div class="task-card-body" style="${collapsed ? 'display: none;' : ''}">`;
                     
                     if (task.data.length === 0) {
                         html += `<div class="empty-state">Нет данных</div>`;
@@ -286,7 +575,13 @@ function renderUI() {
                         }
                         html += `<th>Действия</th></tr>`;
                         
+                        const isProgram = task.header.TpTsk === 4;
                         task.data.forEach((row, dIdx) => {
+                            // Пара слов (wordIdx): 0 → w[6],w[7]; 1 → w[4],w[5]; 2 → w[2],w[3]; 3 → w[0],w[1]
+                            const wordPairIdx = (wordIdx) => 3 - Math.floor(wordIdx / 2);
+                            const pairSelected = (wordIdx) => isProgram && selectedPair &&
+                                selectedPair.bIdx === bIdx && selectedPair.tIdx === tIdx &&
+                                selectedPair.dIdx === dIdx && selectedPair.pair === wordPairIdx(wordIdx);
                             html += `<tr>
                                 <td class="row-num">${dIdx}</td>
                                 <td>
@@ -301,22 +596,29 @@ function renderUI() {
                                 </td>`;
                             
                             row.words.forEach((w, wordIdx) => {
-                                html += `<td>
-                                    <input type="text" 
-                                           class="inline-edit hex-input" 
-                                           value="${w}" 
+                                const sel = pairSelected(wordIdx);
+                                html += `<td class="${sel ? 'pair-selected' : ''}"
+                                         ${isProgram ? `data-action="selectPair" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" data-pair="${wordPairIdx(wordIdx)}"` : ''}>
+                                    <input type="text"
+                                           class="inline-edit hex-input"
+                                           value="${w}"
                                            maxlength="4"
-                                           data-bidx="${bIdx}" 
-                                           data-tidx="${tIdx}" 
-                                           data-didx="${dIdx}" 
+                                           data-bidx="${bIdx}"
+                                           data-tidx="${tIdx}"
+                                           data-didx="${dIdx}"
                                            data-field="word"
                                            data-wordidx="${wordIdx}"
-                                           title="16-битное hex-значение">
+                                           title="16-битное hex-значение${isProgram ? ', клик вне поля — выбрать пару слов инструкции' : ''}">
                                 </td>`;
                             });
                             
                             html += `<td class="actions">
                                 <button class="btn-icon" data-action="editObject" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" title="Открыть расширенный редактор">Ред.</button>
+                                <button class="btn-icon" data-action="decodeWords" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" title="Расшифровать поля строки">🔎</button>
+                                <button class="btn-icon" data-action="copyRow" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" title="Скопировать строку в буфер обмена">⧉</button>
+                                <button class="btn-icon" data-action="duplicateRow" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" title="Дублировать строку ниже">+</button>
+                                <button class="btn-icon" data-action="moveRow" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" data-dir="-1" title="Переместить строку вверх">↑</button>
+                                <button class="btn-icon" data-action="moveRow" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" data-dir="1" title="Переместить строку вниз">↓</button>
                                 <button class="btn-icon btn-danger" data-action="deleteObject" data-bidx="${bIdx}" data-tidx="${tIdx}" data-didx="${dIdx}" title="Удалить строку">Удал.</button>
                             </td></tr>`;
                         });
@@ -331,6 +633,33 @@ function renderUI() {
             contents.innerHTML += html;
         });
     }
+
+    // Восстанавливаем значение фильтра и применяем его после перерисовки
+    const fi = document.getElementById('filterInput');
+    if (fi) {
+        fi.value = filterText || '';
+        if (filterText) applyFilter();
+    }
+
+    highlightSelectedPair();
+}
+
+// ==================== ВЫБОР ПАРЫ СЛОВ (TpTsk=4) ====================
+// pair 0 → w[6],w[7]; pair 1 → w[4],w[5]; pair 2 → w[2],w[3]; pair 3 → w[0],w[1]
+// wordIdx = 6 - pair*2 и 7 - pair*2
+function highlightSelectedPair() {
+    document.querySelectorAll('.task-card[data-program="1"] td.pair-selected').forEach(td => {
+        td.classList.remove('pair-selected');
+    });
+    if (!selectedPair) return;
+    const card = document.querySelector(
+        `.task-card[data-bidx="${selectedPair.bIdx}"][data-tidx="${selectedPair.tIdx}"][data-program="1"]`);
+    if (!card) return;
+    const wIdx1 = 6 - selectedPair.pair * 2;
+    const wIdx2 = 7 - selectedPair.pair * 2;
+    card.querySelectorAll(`td input[data-didx="${selectedPair.dIdx}"][data-wordidx="${wIdx1}"],
+                           td input[data-didx="${selectedPair.dIdx}"][data-wordidx="${wIdx2}"]`)
+        .forEach(inp => inp.parentElement.classList.add('pair-selected'));
 }
 
 // ==================== ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК ====================
@@ -359,11 +688,17 @@ function editObject(bIdx, tIdx, dIdx) {
     const tp = task.header.TpTsk;
     const row = task.data[dIdx];
     
-    document.getElementById('modalTitle').innerText = `Редактирование (TpTsk=${tp})`;
+    document.getElementById('modalTitle').innerText = `Редактирование: ${tpName(tp)} (TpTsk=${tp})`;
     const body = document.getElementById('modalBody');
     body.innerHTML = '';
 
-    if (tp === 4) renderInstructionForm(body, row.words);
+    if (tp === 4) {
+        // Используем выбранную пару слов; если ничего не выбрано — просим выбрать
+        const sel = (selectedPair && selectedPair.bIdx === bIdx &&
+                     selectedPair.tIdx === tIdx && selectedPair.dIdx === dIdx)
+            ? selectedPair.pair : null;
+        renderInstructionForm(body, row.words, sel);
+    }
     else if (tp === 2) renderTemplateForm(body, row.words);
     else if (tp === 6) renderConfigurationForm(body, row.words);
     else renderRawForm(body, row.words);
@@ -381,7 +716,7 @@ function deleteObject(bIdx, tIdx, dIdx) {
     });
 }
 
-function showConfirmDialog(message, onConfirm) {
+function showConfirmDialog(message, onConfirm, okLabel = 'Удалить', cancelLabel = 'Отмена') {
     const modal = document.createElement('div');
     modal.className = 'modal open';
     modal.style.zIndex = '200';
@@ -394,8 +729,8 @@ function showConfirmDialog(message, onConfirm) {
                 <p>${message}</p>
             </div>
             <div class="modal-footer">
-                <button class="btn-secondary" data-confirm-action="cancel">Отмена</button>
-                <button class="btn-danger" data-confirm-action="ok">Удалить</button>
+                <button class="btn-secondary" data-confirm-action="cancel">${cancelLabel}</button>
+                <button class="btn-danger" data-confirm-action="ok">${okLabel}</button>
             </div>
         </div>
     `;
@@ -403,7 +738,13 @@ function showConfirmDialog(message, onConfirm) {
 
     const cleanup = () => {
         modal.remove();
-        document.removeEventListener('click', handler, true);
+        document.removeEventListener('click', guarded, true);
+    };
+
+    // stopImmediatePropagation — чтобы внешний делегат не отреагировал на кнопки модалки
+    const guarded = (event) => {
+        if (event.target.closest('[data-confirm-action]')) event.stopImmediatePropagation();
+        handler(event);
     };
 
     const handler = (event) => {
@@ -429,6 +770,14 @@ function saveObject() {
     let row = task.data[dIdx];
 
     if (tp === 4) {
+        const sel = (selectedPair && selectedPair.bIdx === bIdx &&
+                     selectedPair.tIdx === tIdx && selectedPair.dIdx === dIdx)
+            ? selectedPair.pair : null;
+        if (sel === null) {
+            // Форма инструкции не отображалась (инструкция не выбрана) — нечего сохранять
+            closeModal();
+            return;
+        }
         let cmd = 0;
         document.querySelectorAll('.cmd-field').forEach(inp => {
             const val = parseInt(inp.value) || 0;
@@ -451,8 +800,9 @@ function saveObject() {
             else if (name === 'inc') cmd |= (val & 0x1) << 30;
             else if (name === 'eop') cmd |= (val & 0x1) << 31;
         });
-        row.words[6] = ((cmd >> 16) & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
-        row.words[7] = (cmd & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
+        const [hiIdx, loIdx] = pairWordIdx(sel);
+        row.words[hiIdx] = ((cmd >> 16) & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
+        row.words[loIdx] = (cmd & 0xFFFF).toString(16).padStart(4, '0').toUpperCase();
     } else if (tp === 2) {
         document.querySelectorAll('.tmpl-field').forEach(inp => {
             const idx = parseInt(inp.dataset.idx);
@@ -509,10 +859,27 @@ function closeModal() {
 }
 
 // ==================== ФОРМЫ РЕДАКТИРОВАНИЯ ====================
-function renderInstructionForm(container, words) {
-    const w1 = parseInt(words[6], 16);
-    const w0 = parseInt(words[7], 16);
-    const cmd = (w1 << 16) | w0;
+// Индексы слов строки данных для выбранной пары: pair 0 → [6,7]; 1 → [4,5]; 2 → [2,3]; 3 → [0,1]
+function pairWordIdx(pair) {
+    return [6 - pair * 2, 7 - pair * 2];
+}
+
+function renderInstructionForm(container, words, selPair) {
+    if (selPair === null || selPair === undefined) {
+        container.innerHTML += `<div class="form-section">
+            <div class="instruction-not-selected">Инструкция не выбрана, выберите сначала инструкцию</div>
+            <p style="font-size: 12px; color: var(--vscode-descriptionForeground);">
+                Кликните по ячейке таблицы (вне поля редактирования) в задании «Программы» (TpTsk=4) —
+                соответствующая пара 16-битных слов будет подсвечена. После этого нажмите «Ред.» снова.
+            </p>
+        </div>`;
+        return;
+    }
+
+    const [hiIdx, loIdx] = pairWordIdx(selPair);
+    const w1 = parseInt(words[hiIdx], 16);
+    const w0 = parseInt(words[loIdx], 16);
+    const cmd = ((isNaN(w1) ? 0 : w1) << 16) | (isNaN(w0) ? 0 : w0);
 
     const fields = [
         { name: 'start_gen', range: '[0]', val: (cmd >> 0) & 1 },
@@ -534,7 +901,7 @@ function renderInstructionForm(container, words) {
     ];
 
     container.innerHTML += `<div class="form-section">
-        <div class="form-section-title">Поля инструкции (32 бита)</div>`;
+        <div class="form-section-title">Поля инструкции (32 бита) — пара ${selPair + 1}: D16b${7 - hiIdx}+D16b${7 - loIdx} (w[${hiIdx}], w[${loIdx}])</div>`;
     
     fields.forEach(f => {
         container.innerHTML += `<div class="bit-field">
@@ -632,6 +999,16 @@ window.addEventListener('message', event => {
         isDirty = false;
         renderUI();
     } else if (message.type === 'saved') {
+        // После записи документа фиксируем текущее состояние как базовое
+        originalState = JSON.parse(JSON.stringify(state));
         markClean();
+    }
+});
+
+// Живой фильтр заданий
+document.addEventListener('input', (event) => {
+    if (event.target && event.target.id === 'filterInput') {
+        filterText = event.target.value;
+        applyFilter();
     }
 });
