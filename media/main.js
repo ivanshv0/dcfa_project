@@ -1,6 +1,25 @@
 // media/main.js
 const vscode = acquireVsCodeApi();
 
+// ==================== ТИПЫ ЗАДАНИЙ (TpTsk) ====================
+const TPTSK_NAMES = {
+    0: 'Алфавиты',
+    1: 'Основы',
+    2: 'Шаблоны',
+    3: 'Константы[статические]',
+    4: 'Программы',
+    5: 'Эталоны',
+    6: 'Конфигурации',
+    7: 'Данные[vr3]',
+    8: 'Константы[динамические]',
+    9: 'Параметры',
+    10: 'Маска[vr4]'
+};
+
+function tpName(tp) {
+    return TPTSK_NAMES[tp] !== undefined ? TPTSK_NAMES[tp] : `Неизвестный тип`;
+}
+
 let state = { header: {}, blocks: [] };
 let originalState = null; // Исходное состояние для сравнения
 let currentEdit = { bIdx: -1, tIdx: -1, dIdx: -1 };
@@ -498,12 +517,12 @@ function renderUI() {
                 html += `<div class="empty-state">Нет заданий в этом блоке</div>`;
             } else {
                 block.tasks.forEach((task, tIdx) => {
-                    const searchHay = `задание ${task.header.ITsk} tptsk=${task.header.TpTsk} cetesk=${task.header.CETsk}`;
+                    const searchHay = `задание ${task.header.ITsk} tptsk=${task.header.TpTsk} ${tpName(task.header.TpTsk)} cetesk=${task.header.CETsk}`;
                     html += `<div class="task-card" data-search="${searchHay}" data-bidx="${bIdx}" data-tidx="${tIdx}">
                         <div class="task-card-header">
                             <h4>
-                                Задание ${task.header.ITsk}
-                                <span class="task-type-badge task-type-${task.header.TpTsk}">TpTsk=${task.header.TpTsk}</span>
+                                Задание ${task.header.ITsk} ${tpName(task.header.TpTsk)} (TpTsk=${task.header.TpTsk})
+                                <span class="task-type-badge task-type-${task.header.TpTsk}">${tpName(task.header.TpTsk)}</span>
                             </h4>
                             <button class="btn-add" data-action="addObject" data-bidx="${bIdx}" data-tidx="${tIdx}">+ Добавить</button>
                         </div>
@@ -606,7 +625,7 @@ function editObject(bIdx, tIdx, dIdx) {
     const tp = task.header.TpTsk;
     const row = task.data[dIdx];
     
-    document.getElementById('modalTitle').innerText = `Редактирование (TpTsk=${tp})`;
+    document.getElementById('modalTitle').innerText = `Редактирование: ${tpName(tp)} (TpTsk=${tp})`;
     const body = document.getElementById('modalBody');
     body.innerHTML = '';
 
