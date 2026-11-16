@@ -25,6 +25,7 @@ let originalState = null; // Исходное состояние для срав
 let currentEdit = { bIdx: -1, tIdx: -1, dIdx: -1 };
 // Выбранная пара слов для TpTsk=4 (индексы wordIdx в строке данных)
 let selectedPair = null; // { bIdx, tIdx, dIdx, pair } где pair: 0 → w[6],w[7]; 1 → w[4],w[5]; 2 → w[2],w[3]; 3 → w[0],w[1]
+let collapsedTasks = new Set(); // свернутые карточки заданий: ключ `${bIdx}:${tIdx}` (по умолчанию все развернуты)
 let activeTab = 0;
 let isDirty = false; // Флаг несохранённых изменений
 
@@ -53,6 +54,17 @@ document.addEventListener('click', (event) => {
                 selectedPair = { bIdx, tIdx, dIdx, pair };
             }
             highlightSelectedPair();
+            break;
+        }
+        case 'toggleTaskCollapse': {
+            // Свернуть/развернуть таблицу значений задания
+            const key = `${bIdx}:${tIdx}`;
+            if (collapsedTasks.has(key)) {
+                collapsedTasks.delete(key);
+            } else {
+                collapsedTasks.add(key);
+            }
+            renderUI();
             break;
         }
         case 'addObject':
@@ -532,16 +544,24 @@ function renderUI() {
             } else {
                 block.tasks.forEach((task, tIdx) => {
                     const isProgramTask = task.header.TpTsk === 4;
+                    const collapsed = collapsedTasks.has(`${bIdx}:${tIdx}`);
                     const searchHay = `задание ${task.header.ITsk} tptsk=${task.header.TpTsk} ${tpName(task.header.TpTsk)} cetesk=${task.header.CETsk}`;
-                    html += `<div class="task-card" data-search="${searchHay}" data-bidx="${bIdx}" data-tidx="${tIdx}" ${isProgramTask ? 'data-program="1"' : ''}>
+                    html += `<div class="task-card${collapsed ? ' collapsed' : ''}" data-search="${searchHay}" data-bidx="${bIdx}" data-tidx="${tIdx}" ${isProgramTask ? 'data-program="1"' : ''}>
                         <div class="task-card-header">
                             <h4>
                                 Задание ${task.header.ITsk} ${tpName(task.header.TpTsk)} (TpTsk=${task.header.TpTsk})
                                 <span class="task-type-badge task-type-${task.header.TpTsk}">${tpName(task.header.TpTsk)}</span>
                             </h4>
-                            <button class="btn-add" data-action="addObject" data-bidx="${bIdx}" data-tidx="${tIdx}">+ Добавить</button>
+                            <div class="task-card-header-actions">
+                                <button class="btn-collapse ${collapsed ? 'needs-attention' : ''}"
+                                        data-action="toggleTaskCollapse" data-bidx="${bIdx}" data-tidx="${tIdx}"
+                                        title="${collapsed ? 'Развернуть таблицу значений' : 'Свернуть таблицу значений'}">
+                                    ${collapsed ? '▸ Развернуть' : '▾ Свернуть'}
+                                </button>
+                                <button class="btn-add" data-action="addObject" data-bidx="${bIdx}" data-tidx="${tIdx}">+ Добавить</button>
+                            </div>
                         </div>
-                        <div class="task-card-body">`;
+                        <div class="task-card-body" style="${collapsed ? 'display: none;' : ''}">`;
                     
                     if (task.data.length === 0) {
                         html += `<div class="empty-state">Нет данных</div>`;

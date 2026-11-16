@@ -636,3 +636,49 @@ td.pair-selected .hex-input {
     font-weight: 600;
     margin-bottom: 8px;
 }
+
+/* ==================== СВЕРНУТЬ/РАЗВЕРНУТЬ КАРТОЧКУ ЗАДАНИЯ ==================== */
+.task-card-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-collapse {
+    padding: 3px 10px;
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: var(--dcfa-border-radius);
+    background: var(--vscode-button-secondaryBackground, #3a3d41);
+    color: var(--vscode-button-secondaryForeground, #ccc);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.btn-collapse:hover {
+    background: var(--vscode-button-secondaryHoverBackground, #4b4e53);
+}
+
+/* Яркая подсветка кнопки "Развернуть" у свернутой карточки */
+.btn-collapse.needs-attention {
+    background: #ff9800;
+    color: #1e1e1e;
+    font-weight: 700;
+    border-color: #ffd54d;
+    box-shadow: 0 0 8px rgba(255, 152, 0, 0.8);
+    animation: collapse-pulse 1.2s ease-in-out infinite;
+}
+
+.btn-collapse.needs-attention:hover {
+    background: #ffb74d;
+}
+
+@keyframes collapse-pulse {
+    0%, 100% { box-shadow: 0 0 4px rgba(255, 152, 0, 0.6); }
+    50%      { box-shadow: 0 0 12px rgba(255, 213, 77, 0.95); }
+}
+
+.task-card.collapsed .task-card-header {
+    border-bottom: none;
+}
